@@ -1,0 +1,1659 @@
+{
+  "name": "Email classification_IMAP 26 Mar",
+  "nodes": [
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        -800,
+        -180
+      ],
+      "id": "2626d5f5-7a37-474a-b25a-092a0ce7e2ef",
+      "name": "Loop Over Items"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "name": "Replace Me",
+      "typeVersion": 1,
+      "position": [
+        -580,
+        -180
+      ],
+      "id": "526c3830-3de9-4402-9871-32f468152e45"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Get the current item from the loop\nconst item = $input.item;\nconst emailData = {};\n\n// Extract basic email details\nemailData.subject = item.json.subject || \"\";\nemailData.from = item.json.from || \"\";\nemailData.date = item.json.date || new Date().toISOString();\n\n// Extract Gmail Message ID - fixes the labeling issue\n// For Gmail IMAP, the internal ID is often in these locations:\nlet gmailId = null;\n\n// Check for Gmail-specific headers first\nif (item.json.xGmMsgid) {\n  gmailId = item.json.xGmMsgid;\n} else if (item.json[\"x-gm-msgid\"]) {\n  gmailId = item.json[\"x-gm-msgid\"];\n} else if (item.json.headers && item.json.headers[\"x-gm-msgid\"]) {\n  gmailId = item.json.headers[\"x-gm-msgid\"];\n}\n\n// Fallback to standard message ID parsing\nif (!gmailId) {\n  // Extract raw messageId from different possible formats\n  let rawMessageId = item.json.messageId || \n                    item.json.id || \n                    item.json[\"message-id\"] ||\n                    (item.json.metadata && item.json.metadata[\"message-id\"]) ||\n                    \"\";\n                    \n  // If message ID has angle brackets (< >), remove them for Gmail API\n  if (rawMessageId && rawMessageId.includes('<') && rawMessageId.includes('>')) {\n    rawMessageId = rawMessageId.replace(/<|>/g, '');\n  }\n\n  // If it's a Gmail message ID, extract just the part before @mail.gmail.com\n  if (rawMessageId && rawMessageId.includes('@mail.gmail.com')) {\n    gmailId = rawMessageId.split('@mail.gmail.com')[0];\n  } else {\n    gmailId = rawMessageId;\n  }\n}\n\n// Save both the original message ID and the Gmail ID\nemailData.rawMessageId = item.json.messageId || \"\";\nemailData.messageId = gmailId;\n\n// Log the extracted IDs for debugging\nconsole.log(\"Original messageId:\", item.json.messageId);\nconsole.log(\"Processed Gmail messageId:\", gmailId);\n\n// Extract body\n// Check all possible locations where body content might be stored\nemailData.body = item.json.body || \n                 item.json.html || \n                 item.json.text || \n                 item.json.textPlain || \n                 \"\";\n\n// DIRECT ATTACHMENT CHECK - most reliable approach\nconst attachmentProps = Object.keys(item.json).filter(key => key.startsWith('attachment_'));\nconsole.log(\"Found these attachment properties:\", attachmentProps);\n\n// Force hasAttachments to true if we have attachment_ properties\nemailData.hasAttachments = attachmentProps.length > 0;\n\n// Create a proper attachments array with all available data\nemailData.attachments = [];\nfor (const key of attachmentProps) {\n  const attachment = item.json[key];\n  emailData.attachments.push({\n    name: attachment.fileName || attachment.name || \"\",\n    mimeType: attachment.mimeType || \"\",\n    fileExtension: attachment.fileExtension || \"\",\n    fileSize: attachment.fileSize || 0,\n    key: key,\n    // Include the complete attachment object for reference\n    originalData: attachment\n  });\n}\n\n// If body is HTML, strip tags\nif (emailData.body && emailData.body.includes('<')) {\n  emailData.plainText = emailData.body.replace(/<[^>]*>?/gm, '');\n} else {\n  emailData.plainText = emailData.body || \"\";\n}\n\n// Combine subject and body for analysis\nemailData.fullContent = `Subject: ${emailData.subject}\\n\\nBody:\\n${emailData.plainText}`;\n\n// Debug output with all possible information\nconsole.log({\n  rawMessageId: emailData.rawMessageId,\n  processedMessageId: emailData.messageId,\n  hasAttachments: emailData.hasAttachments,\n  attachmentCount: emailData.attachments.length,\n  attachmentProps,\n  bodyLength: emailData.body ? emailData.body.length : 0,\n  itemKeys: Object.keys(item.json),\n  // Log first 100 chars of body if any\n  bodyPreview: emailData.body ? emailData.body.substring(0, 100) + \"...\" : \"No body found\"\n});\n\nreturn {json: emailData};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -580,
+        -340
+      ],
+      "id": "52735456-856c-42bb-8ddb-f5001df54226",
+      "name": "Code"
+    },
+    {
+      "parameters": {
+        "jsCode": "const emailData = $input.item.json;\n\n// Preserve hasAttachments from previous node - important!\nconst originalHasAttachments = emailData.hasAttachments === true;\n\n// Safety check: directly verify attachment properties exist\nconst directAttachmentCheck = Object.keys(emailData).some(key => key.startsWith('attachment_'));\n\n// Set hasAttachments using most reliable information\nemailData.hasAttachments = originalHasAttachments || directAttachmentCheck;\n\n// Process attachments if we have them\nif (emailData.hasAttachments) {\n  const attachments = emailData.attachments || [];\n  \n  // If we have attachment properties but empty attachments array, create direct entries\n  if (attachments.length === 0 && directAttachmentCheck) {\n    const attachmentProps = Object.keys(emailData).filter(key => key.startsWith('attachment_'));\n    for (const key of attachmentProps) {\n      const attachment = emailData[key];\n      attachments.push({\n        name: attachment.fileName || attachment.name || \"\",\n        mimeType: attachment.mimeType || \"\",\n        fileExtension: attachment.fileExtension || \"\",\n        fileSize: attachment.fileSize || 0\n      });\n    }\n    emailData.attachments = attachments;\n  }\n  \n  // Filter for PDF, Word, text attachments\n  const processableAttachments = emailData.attachments.filter(att => {\n    const mimeType = (att.mimeType || \"\").toLowerCase();\n    return mimeType.includes('pdf') || \n           mimeType.includes('word') || \n           mimeType.includes('text') ||\n           mimeType.includes('plain');\n  });\n  \n  emailData.processableAttachments = processableAttachments;\n}\n\n// Debug information\nconsole.log(\"Code1 node: hasAttachments =\", emailData.hasAttachments);\nconsole.log(\"Attachments count:\", (emailData.attachments || []).length);\nconsole.log(\"Processable attachments:\", (emailData.processableAttachments || []).length);\n\nreturn {json: emailData};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -360,
+        -340
+      ],
+      "id": "98319203-c651-4af5-a6e4-d8e0c2990da2",
+      "name": "Code1"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "03ad6684-8e19-4278-a32f-5b6694f1bb40",
+              "leftValue": "={{$json.hasAttachments === true}}",
+              "rightValue": "true",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -140,
+        -340
+      ],
+      "id": "5a5efacc-536f-43c0-9bbb-16c5243893c9",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4",
+          "mode": "list",
+          "cachedResultName": "GPT-4"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "=Please analyze the following email and provide the following in JSON format:\n1) requestType: The main request type from the predefined categories\n2) subRequestType: The sub-request type if applicable\n3) loanNumber: Any loan or account identifiers mentioned\n4) amount: Any monetary amounts mentioned\n5) dates: Any relevant dates mentioned\n6) contacts: Names and contact information of senders/recipients\n7) intent: A brief description of the primary intent\n8) confidenceScore: Your confidence in this classification (0.0-1.0)\n\nEMAIL CONTENT:\n{{$node[\"Process Attachments\"].json.fullContent}}\n\nNote: This email includes attachment content in the text above."
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.8,
+      "position": [
+        2100,
+        -520
+      ],
+      "id": "827f09d6-0420-4a60-b6b0-782db7e3863c",
+      "name": "OpenAI",
+      "credentials": {
+        "openAiApi": {
+          "id": "AMKMphsN16CHbClo",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4",
+          "mode": "list",
+          "cachedResultName": "GPT-4"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "=[\n  {\n    \"role\": \"system\",\n    \"content\": \"You are an expert email classifier for a commercial bank's operations department. Your task is to analyze incoming emails and precisely categorize them while extracting critical information. Your classification must be highly accurate as it determines automated workflow routing.\n\nCLASSIFICATION CATEGORIES:\n\n1. Adjustment\n   - Definition: Requests to modify financial entries, refund charges, or correct billing errors\n   - Sub-types: \n      * Fee Reversal: Requests to reverse or waive fees\n      * Account Correction: Fix posting or transaction errors\n      * Statement Correction: Update or fix information on statements\n      * Late Fee Removal: Specifically asking for late fee waiver\n   - Key indicators: phrases like 'reverse charge', 'refund fee', 'incorrect charge', 'remove fee', 'adjustment needed'\n   - Example: 'Please reverse the $25 wire transfer fee charged on account #12345 as this was incorrectly applied.'\n\n2. AU Transfer\n   - Definition: Requests to transfer authorization rights or signatories on accounts\n   - Sub-types:\n      * New Signatory Addition: Add new authorized users\n      * Signatory Removal: Remove existing signatories\n      * Authorization Update: Modify existing permissions\n      * Ownership Transfer: Change of account ownership\n   - Key indicators: 'add signatory', 'remove authorization', 'change account access', 'update authorized users'\n   - Example: 'Please add John Smith as an authorized signer on business account #54321 effective immediately.'\n\n3. Closing Notice\n   - Definition: Notifications about closing accounts or loans, including payoff requests\n   - Sub-types:\n      * Account Termination: Close deposit/checking accounts\n      * Loan Termination: Ending loan agreements\n      * Payoff Request: Requesting payoff amount for loan closure\n      * Foreclosure Process: Initiating foreclosure proceedings\n   - Key indicators: 'close account', 'terminate loan', 'payoff amount', 'foreclosure process', 'final payment'\n   - Example: 'I would like to close my savings account #33333 and transfer the balance to my checking account.'\n\n4. Commitment Change\n   - Definition: Requests to modify terms of loans or commitments\n   - Sub-types:\n      * Rate Modification: Change interest rates\n      * Term Extension: Extend loan terms\n      * Collateral Change: Modify collateral arrangements\n      * Payment Restructuring: Change payment structure or schedule\n   - Key indicators: 'modify loan terms', 'extend commitment', 'change interest rate', 'refinance', 'restructure payments'\n   - Example: 'Due to financial hardship, I am requesting a modification of loan #LN-7890 to extend the term by 24 months.'\n\n5. Fee Payment\n   - Definition: Communications about making payments specifically for fees or service charges\n   - Sub-types:\n      * Processing Fee Payment: Paying transaction fees\n      * Service Charge Payment: Paying for banking services\n      * Late Fee Payment: Specifically paying late fees\n      * Origination Fee Payment: Paying loan origination fees\n   - Key indicators: 'fee payment', 'paying service charge', 'enclosed fee', 'processing payment'\n   - Example: 'I have enclosed a check for $100 to cover the annual service fee for safety deposit box #42.'\n\n6. Money Movement-Inbound\n   - Definition: Communications about incoming funds to accounts\n   - Sub-types:\n      * Deposit Notification: Notice of incoming deposits\n      * Wire Transfer Inbound: Incoming wire transfers\n      * ACH Credit: Incoming ACH transactions\n      * Check Deposit: Depositing checks\n   - Key indicators: 'incoming transfer', 'deposit funds', 'receive payment', 'credit to account'\n   - Example: 'Please confirm receipt of wire transfer for $5,000 to account #76543 from ABC Corporation.'\n\n7. Money Movement-Outbound\n   - Definition: Communications about payments or transfers going out from accounts\n   - Sub-types:\n      * Wire Transfer Outbound: Sending wire transfers\n      * ACH Debit: Outgoing ACH payments\n      * Bill Payment: Making payments to vendors/creditors\n      * Internal Transfer Out: Moving funds between accounts\n   - Key indicators: 'send payment', 'transfer funds', 'withdraw', 'pay vendor', 'issue check'\n   - Example: 'Please initiate a wire transfer of $10,000 from account #98765 to Deutsche Bank routing #021001033.'\n\n8. Inquiry\n   - Definition: Questions about accounts, products, services, or procedures without requesting specific actions\n   - Sub-types:\n      * Account Inquiry: Questions about account status, balance, or history\n      * Product Inquiry: Questions about bank products or services\n      * Process Inquiry: Questions about how to complete banking processes\n      * Status Inquiry: Asking about the status of a previous request\n   - Key indicators: 'question about', 'inquiring about', 'could you tell me', 'information on', 'check status'\n   - Example: 'Could you please provide the current payoff amount for loan #LN-12345? I'm considering early repayment options.'\n\n9. Complaint\n   - Definition: Expressions of dissatisfaction about service, products, or experiences\n   - Sub-types:\n      * Service Complaint: Issues with customer service or processing\n      * System Complaint: Problems with online banking or technical systems\n      * Policy Complaint: Disagreements about bank policies or procedures\n      * Resolution Request: Specific requests to resolve issues\n   - Key indicators: 'complaint', 'dissatisfied', 'poor service', 'not acceptable', 'issue with', 'problem', 'dispute'\n   - Example: 'I've been trying to access my online account for three days and keep getting error messages. This is unacceptable and needs immediate resolution.'\n\n10. Document Request\n    - Definition: Requests for statements, forms, confirmations, or other bank documents\n    - Sub-types:\n       * Statement Request: Asking for account statements\n       * Tax Document Request: Requesting tax forms or documentation\n       * Confirmation Request: Asking for verification of transactions or balances\n       * Form Request: Requesting specific banking forms\n    - Key indicators: 'need a copy', 'requesting document', 'please send statement', 'form request', 'provide documentation'\n    - Example: 'Please send me copies of my account statements for the past 6 months for tax preparation purposes.'\n\n11. Account Maintenance\n    - Definition: Requests to update account information that don't fit other categories\n    - Sub-types:\n       * Contact Update: Changes to phone, email, or address\n       * Profile Update: Updates to personal information\n       * Preference Changes: Updates to communication or account preferences\n       * Service Enrollment/Cancellation: Adding or removing account services\n    - Key indicators: 'update my information', 'change address', 'new phone number', 'opt out of', 'enroll in'\n    - Example: 'I've moved and need to update my mailing address for all my accounts to 123 New Street, Anytown, ST 12345.'\n\n12. Security Concern\n    - Definition: Reports of potential fraud, unauthorized access, or security issues\n    - Sub-types:\n       * Fraud Report: Reporting unauthorized transactions\n       * Account Access Issue: Problems accessing accounts securely\n       * Identity Theft Concern: Potential identity theft situations\n       * Card Security: Lost, stolen, or compromised cards\n    - Key indicators: 'unauthorized transaction', 'suspicious activity', 'fraud', 'security breach', 'compromised account'\n    - Example: 'I noticed a transaction for $500 that I didn't authorize on my account yesterday. I believe my card may have been compromised.'\n\nUNCLASSIFIED HANDLING:\n- Use 'Unclassified' only when the email content genuinely doesn't match any of the defined categories\n- Common reasons for unclassified emails include:\n  * Multiple unrelated requests in a single email\n  * Vague or unclear language without specific actionable items\n  * Non-bank related content or spam\n  * Completely novel request types not covered by existing categories\n- For unclassified emails, provide a detailed explanation in the 'intent' field about why classification wasn't possible\n- Always assign a low confidence score (0.4 or below) for unclassified emails\n\nIMPORTANT EXTRACTION GUIDELINES:\n\n1. Loan Numbers: Look for patterns such as 'Loan #', 'LN-', 'Account:', or digits following 'loan' or 'account'. Extract the full identifier including any letters and numbers. Common formats include LN-XXXXX, LNXXXXXX, or XXX-XXX-XXX.\n\n2. Amounts: Always capture dollar amounts including the decimal points. Look for patterns like '$1,000.00', '1000 dollars', 'USD 1000', etc. Convert text-based amounts ('one thousand dollars') to numerical values.\n\n3. Dates: Extract all relevant dates mentioned, including due dates, effective dates, transaction dates, and requested completion dates. Convert formats to ISO standard when possible.\n\n4. Contact Information: Capture names, email addresses, phone numbers, and any other identifying information of senders, recipients, or mentioned parties.\n\n5. CONFIDENCE SCORING CRITERIA:\n   - 0.9-1.0: Clear, unambiguous request matching a single category with specific keywords\n   - 0.8-0.89: Clear request but with some elements that could fit secondary categories\n   - 0.7-0.79: Somewhat clear request with multiple indicators across categories\n   - 0.6-0.69: Ambiguous request requiring significant inference\n   - 0.5-0.59: Very ambiguous but still classifiable with low confidence\n   - Below 0.5: Highly unclear or should be classified as 'Unclassified'\n\nDISAMBIGUATION RULES:\n- If an email contains multiple distinct requests, classify based on the primary or most urgent request\n- For complaints that also request specific actions, classify based on the action if it fits clearly into another category\n- For inquiries that include document requests, classify as 'Document Request' if that's the main purpose\n- Security concerns take precedence over other classifications when fraud or unauthorized access is mentioned\n- When truly uncertain between multiple categories, use the lower confidence score range\n\nFor ambiguous cases, focus on the primary action requested rather than secondary details. If truly uncertain, use the 'Unclassified' category and provide a low confidence score.\n\nYour output must be valid JSON with the fields: requestType, subRequestType, loanNumber, amount, dates, contacts, intent, and confidenceScore.\"\n  },\n  {\n    \"role\": \"user\",\n    \"content\": \"Please analyze the following email and provide the following in JSON format:\\n1) requestType: The main request type from the predefined categories\\n2) subRequestType: The sub-request type if applicable\\n3) loanNumber: Any loan or account identifiers mentioned\\n4) amount: Any monetary amounts mentioned\\n5) dates: Any relevant dates mentioned\\n6) contacts: Names and contact information of senders/recipients\\n7) intent: A brief description of the primary intent\\n8) confidenceScore: Your confidence in this classification (0.0-1.0)\\n\\nEMAIL CONTENT:\\n{{$json.fullContent}}\"\n  }\n]"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.8,
+      "position": [
+        1000,
+        -120
+      ],
+      "id": "e750114e-5b57-42d7-a51b-7ee566d8a5a4",
+      "name": "OpenAI1",
+      "credentials": {
+        "openAiApi": {
+          "id": "AMKMphsN16CHbClo",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Get the OpenAI response\nconst response = $input.item.json;\n\n// Extract the content from the OpenAI response\nlet content = '';\nif (response.choices && response.choices.length > 0 && response.choices[0].message) {\n  content = response.choices[0].message.content;\n} else {\n  // Fallback if the structure is different\n  content = JSON.stringify(response);\n}\n\n// Try to parse the content as JSON\nlet parsedData = {};\ntry {\n  // Remove any markdown code block indicators if present\n  if (content.includes('```json')) {\n    content = content.replace(/```json/g, '').replace(/```/g, '').trim();\n  }\n  parsedData = JSON.parse(content);\n} catch (error) {\n  // If parsing fails, provide a default structure\n  parsedData = {\n    requestType: \"Unclassified\",\n    subRequestType: \"None\",\n    error: \"Failed to parse response\",\n    originalContent: content\n  };\n}\n\n// Add original email metadata\nparsedData.emailMetadata = {\n  subject: $node[\"Code\"].json.subject,\n  from: $node[\"Code\"].json.from,\n  hasAttachments: $node[\"Code1\"].json.hasAttachments\n};\n\n// Return the parsed data\nreturn {json: parsedData};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2460,
+        -520
+      ],
+      "id": "1c37ee73-e9e6-4619-bc1c-e3731f7c3663",
+      "name": "Code2"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        2780,
+        -400
+      ],
+      "id": "c8c02b1f-6477-43ea-846b-6c7e281357d2",
+      "name": "Merge"
+    },
+    {
+      "parameters": {
+        "jsCode": "const result = $input.item.json;\n\n// Determine if we need human review\nconst needsHumanReview = \n  result.confidenceScore < 0.7 || \n  result.requestType === \"Unclassified\" ||\n  (result.loanNumber === \"Not Found\" && result.requestType !== \"Unclassified\");\n\n// Add additional metadata for routing\nresult.needsHumanReview = needsHumanReview;\nresult.routingPath = needsHumanReview ? \"manual_review\" : result.requestType.toLowerCase().replace(/\\s+/g, '_');\n\nreturn {json: result};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3420,
+        -400
+      ],
+      "id": "a4726acc-66d8-47da-974e-4ca7a169aac4",
+      "name": "Code4"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{$json.requestType}}",
+                    "rightValue": "Adjustment",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "444d2a03-0f0c-4f4c-937d-ad5f490df09c"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Adjustment"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "7d91ab47-40aa-43c1-a4cd-7552038c5c03",
+                    "leftValue": "={{$json.requestType}}",
+                    "rightValue": "AU Transfer",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "AU Transfer"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "016a54ca-8b83-4285-a1a1-439e40260b91",
+                    "leftValue": "={{$json.requestType}}",
+                    "rightValue": "Closing Notice",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Closing Notice"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "2fbe695a-26d1-4d6c-8794-ed5282450d26",
+                    "leftValue": "={{$json.requestType}}",
+                    "rightValue": "Commitment Change",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Commitment Change"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "bffd2050-d246-496b-afff-c732e27fdf76",
+                    "leftValue": "={{$json.requestType}}",
+                    "rightValue": "Fee Payment",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Fee Payment"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "401b4125-8c00-46e7-abf0-59406371fff3",
+                    "leftValue": "={{$json.requestType}}",
+                    "rightValue": "Money Movement-Inbound",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Money Movement-Inbound"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "cf64471a-2d43-459a-a0a4-2890ca615b01",
+                    "leftValue": "={{$json.requestType}}",
+                    "rightValue": "Money Movement-Outbound",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Money Movement-Outbound"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "16845623-4a86-4552-8b57-85427e18c7c5",
+                    "leftValue": "={{Number($json.confidenceScore)}}",
+                    "rightValue": 0.7,
+                    "operator": {
+                      "type": "number",
+                      "operation": "lt"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Confidence score"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "3a48888c-1a24-4def-ba99-4bed541be742",
+                    "leftValue": "={{$json.requestType}}",
+                    "rightValue": "Unclassified",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "7153811d-8e60-4182-b8a5-3da2ed5d22ee",
+                    "leftValue": "={{$json.requestType}}",
+                    "rightValue": "Inquiry",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Inquiry"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "f7239652-ff45-4ba7-8ce8-1d4266baef59",
+                    "leftValue": "={{$json.requestType}}",
+                    "rightValue": "Complaint",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Complaint"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "8039c93f-2bec-4d5f-9f59-8d2d46cedb3b",
+                    "leftValue": "={{$json.requestType}}",
+                    "rightValue": "Document Request",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Document Request"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "3fb2e51a-5fe8-4684-9080-76ab6d4208fb",
+                    "leftValue": "={{$json.requestType}}",
+                    "rightValue": "Account Maintenance",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Account Maintenance"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "0f46932c-0818-4af9-9611-05a17dc62701",
+                    "leftValue": "={{$json.requestType}}",
+                    "rightValue": "Security Concern",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Security Concern"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        4660,
+        -500
+      ],
+      "id": "1258ca85-fe26-4577-8079-d0a02912ac9d",
+      "name": "Switch"
+    },
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "filters": {}
+      },
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -2560,
+        1580
+      ],
+      "id": "cdb982ff-ffc6-43aa-b1a3-9ba3fe616a79",
+      "name": "Gmail Trigger1",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "hn8gciisFeXTf81O",
+          "name": "Gmail account"
+        }
+      },
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "options": {
+          "reset": "={{ $json.processableAttachments }}"
+        }
+      },
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        380,
+        -1100
+      ],
+      "id": "d27ee35a-3ab6-48b4-b60d-ec9ea1d5fbb4",
+      "name": "Loop Over Items1"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "name": "Replace Me1",
+      "typeVersion": 1,
+      "position": [
+        820,
+        -980
+      ],
+      "id": "db7a80af-d2e5-467f-9b9b-49a5f0c6e72c"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{$json.mimeType.toLowerCase()}}",
+                    "rightValue": "pdf",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "6df7675f-925c-4159-aa88-fd860fbe538a"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "PDF"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "59ac8ea9-bc22-4a4c-8d11-d9dbf498d8d3",
+                    "leftValue": "",
+                    "rightValue": "",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Other"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        600,
+        -1200
+      ],
+      "id": "806433a2-609b-4648-abf1-61fd594dfea0",
+      "name": "Switch1"
+    },
+    {
+      "parameters": {
+        "operation": "pdf",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [
+        820,
+        -1420
+      ],
+      "id": "d817cef2-d953-4112-bb13-10814e3a08e7",
+      "name": "Extract from File"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Simple pass-through for Word files\nconst item = $input.item.json;\n\nreturn {\n  json: {\n    fileName: item.name,\n    fileContent: \"[Non-Pdf attachments cannot be processed.]\",\n    fileType: \"Non-Pdf\"\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        -1180
+      ],
+      "id": "c6beb1b8-2226-4678-a4c2-9a802d262023",
+      "name": "Code5"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Get the extracted content\nconst item = $input.item.json;\n\n// Get the original email data\nconst originalData = $node[\"Code1\"].json;\n\n// Create a standardized output format regardless of file type\nconst extractedText = item.text || item.fileContent || \"\";\nconst fileName = item.fileName || item.name || \"unknown\";\n\n// Store this attachment content\nif (!originalData.attachmentContent) {\n  originalData.attachmentContent = \"\";\n}\n\n// Add this attachment's content\noriginalData.attachmentContent += `\\n\\n--- ATTACHMENT: ${fileName} ---\\n${extractedText}\\n--- END ATTACHMENT ---\\n\\n`;\n\nreturn {json: originalData};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1500,
+        -1240
+      ],
+      "id": "3618f23e-e3dc-440a-bdfa-5b2f52b9ffc2",
+      "name": "Code6"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        1220,
+        -1240
+      ],
+      "id": "e3c07331-25c8-415b-97ad-c48a9ca7acb5",
+      "name": "Merge1"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Get the email with all processed attachments\nconst emailData = $input.item.json;\n\n// Create the full content combining email and attachments\nemailData.fullContent = `Subject: ${emailData.subject}\\n\\nBody:\\n${emailData.plainText}`;\n\n// Add attachments if any were processed\nif (emailData.processableAttachments && emailData.processableAttachments.length > 0) {\n  for (const att of emailData.processableAttachments) {\n    // If we have content from the attachment, add it\n    if (att.content) {\n      const contentStr = typeof att.content === 'string' \n        ? att.content \n        : \"[Binary content]\";\n      \n      emailData.fullContent += `\\n\\n--- ATTACHMENT: ${att.name} ---\\n${contentStr}\\n--- END ATTACHMENT ---\\n\\n`;\n    }\n  }\n}\n\nreturn {json: emailData};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1720,
+        -1240
+      ],
+      "id": "218175c0-b396-420d-8084-66a9f7552afd",
+      "name": "Process Attachments"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Get the input data\nconst inputData = $input.item.json;\n\n// Create a standardized output object\nlet output = {\n  requestType: \"Unclassified\",\n  subRequestType: \"None\",\n  loanNumber: \"Not Found\",\n  amount: 0,\n  dates: {},\n  contacts: {},\n  intent: \"Unknown\",\n  confidenceScore: 0.5,\n  emailMetadata: inputData.emailMetadata || {},\n  isDuplicate: false,\n  processingTimestamp: new Date().toISOString()\n};\n\n// Check if data is available and map to output\nif (inputData.requestType) {\n  // Direct mapping if fields are at root level\n  output.requestType = inputData.requestType;\n  output.subRequestType = inputData.subRequestType || \"None\";\n  output.loanNumber = inputData.loanNumber || \"Not Found\";\n  output.amount = inputData.amount || 0;\n  output.dates = inputData.dates || {};\n  output.contacts = inputData.contacts || {};\n  output.intent = inputData.intent || \"Unknown\";\n  output.confidenceScore = inputData.confidenceScore || 0.5;\n}\n\n// Add metadata for duplicate detection\nif (output.emailMetadata && output.emailMetadata.subject) {\n  const subject = output.emailMetadata.subject.toLowerCase();\n  output.isDuplicate = subject.includes('re:') || subject.includes('fwd:');\n}\n\nreturn { json: output };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3000,
+        -400
+      ],
+      "id": "d776ae53-02cc-44d6-8367-61259c9960c5",
+      "name": "Code7"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Get the OpenAI response\nconst response = $input.item.json;\n\n// Check if we have a structured response with message.content\nlet content = '';\nif (response.message && response.message.content) {\n  content = response.message.content;\n} else if (response.choices && response.choices.length > 0 && response.choices[0].message) {\n  content = response.choices[0].message.content;\n} else {\n  // Fallback if the structure is different\n  content = JSON.stringify(response);\n}\n\n// Log the content for debugging\nconsole.log(\"Content to parse:\", content);\n\n// Try to parse the content as JSON\nlet parsedData = {};\ntry {\n  // Remove any markdown code block indicators if present\n  if (content.includes('```json')) {\n    content = content.replace(/```json/g, '').replace(/```/g, '').trim();\n  }\n  \n  // Clean up the string and parse the object\n  // The content in your screenshot is formatted as a string with \\n and indentation\n  // Remove those escape sequences and try to parse\n  content = content.replace(/\\\\n/g, '').replace(/\\\\\"/g, '\"');\n  \n  // If content is wrapped in square brackets (array), extract just the first object\n  if (content.trim().startsWith('[') && content.trim().endsWith(']')) {\n    try {\n      const parsedArray = JSON.parse(content);\n      if (Array.isArray(parsedArray) && parsedArray.length > 0) {\n        parsedData = parsedArray[0];\n      }\n    } catch (e) {\n      // If array parsing fails, try to extract the object directly\n      const innerContent = content.trim().substring(1, content.trim().length - 1).trim();\n      parsedData = JSON.parse(innerContent);\n    }\n  } else {\n    parsedData = JSON.parse(content);\n  }\n  \n  console.log(\"Successfully parsed data:\", parsedData);\n} catch (error) {\n  // If parsing fails, try a different approach - manual extraction\n  console.log(\"Error parsing JSON:\", error.message);\n  \n  try {\n    // Extract values using regex\n    const requestTypeMatch = content.match(/\"requestType\"\\s*:\\s*\"([^\"]+)\"/);\n    const subRequestTypeMatch = content.match(/\"subRequestType\"\\s*:\\s*\"([^\"]+)\"/);\n    const loanNumberMatch = content.match(/\"loanNumber\"\\s*:\\s*\"([^\"]+)\"/);\n    const confidenceScoreMatch = content.match(/\"confidenceScore\"\\s*:\\s*([\\d\\.]+)/);\n    \n    parsedData = {\n      requestType: requestTypeMatch ? requestTypeMatch[1] : \"Unclassified\",\n      subRequestType: subRequestTypeMatch ? subRequestTypeMatch[1] : \"None\",\n      loanNumber: loanNumberMatch ? loanNumberMatch[1] : \"Not Found\",\n      confidenceScore: confidenceScoreMatch ? parseFloat(confidenceScoreMatch[1]) : 0.5,\n      error: \"Had to use regex extraction due to parsing error\",\n      originalContent: content\n    };\n    \n    console.log(\"Extracted data via regex:\", parsedData);\n  } catch (regexError) {\n    console.log(\"Regex extraction also failed:\", regexError.message);\n    \n    parsedData = {\n      requestType: \"Unclassified\",\n      subRequestType: \"None\",\n      loanNumber: \"Not Found\",\n      amount: 0,\n      dates: {},\n      contacts: {},\n      intent: \"Unknown\",\n      confidenceScore: 0.5,\n      error: \"All parsing methods failed\",\n      originalContent: content\n    };\n  }\n}\n\n// Add original email metadata\nparsedData.emailMetadata = {\n  subject: $node[\"Code\"].json.subject,\n  from: $node[\"Code\"].json.from,\n  hasAttachments: $node[\"Code1\"].json.hasAttachments\n};\n\n// Ensure we have a standardized output format\nconst standardOutput = {\n  requestType: parsedData.requestType || \"Unclassified\",\n  subRequestType: parsedData.subRequestType || \"None\",\n  loanNumber: parsedData.loanNumber || \"Not Found\",\n  amount: parsedData.amount || 0,\n  dates: parsedData.dates || {},\n  contacts: parsedData.contacts || {},\n  intent: parsedData.intent || \"Unknown\",\n  confidenceScore: parsedData.confidenceScore || 0.5,\n  emailMetadata: parsedData.emailMetadata,\n  isDuplicate: false\n};\n\n// Return the structured data\nreturn {json: standardOutput};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1340,
+        -140
+      ],
+      "id": "62cbf711-52f7-4944-8c33-fa592907561e",
+      "name": "Code3"
+    },
+    {
+      "parameters": {
+        "downloadAttachments": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.emailReadImap",
+      "typeVersion": 2,
+      "position": [
+        -1720,
+        -540
+      ],
+      "id": "fd616cff-cc6a-49f6-b0a2-2d7491028351",
+      "name": "Email Trigger (IMAP)",
+      "credentials": {
+        "imap": {
+          "id": "CyJB0vLpkQJwG2L3",
+          "name": "IMAP account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "numberInputs": 10
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        6660,
+        -640
+      ],
+      "id": "cb6c4bce-5533-4a4d-8ff8-9295e66e3910",
+      "name": "Final Merge"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "name": "Replace Me2",
+      "typeVersion": 1,
+      "position": [
+        6980,
+        -560
+      ],
+      "id": "ec5db53e-9e6d-48cc-ad70-ad3e282595ad"
+    },
+    {
+      "parameters": {
+        "operation": "addLabels",
+        "messageId": "={{ $node[\"Combine Message ID with Classification\"].json.id }}",
+        "labelIds": [
+          "Label_6956817707923825391"
+        ]
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        5600,
+        -1180
+      ],
+      "id": "50c96026-b562-43f3-9f3f-4d12942d7f3a",
+      "name": "Adustment Label",
+      "webhookId": "163bfd64-9f0b-4fd5-9733-1907fe81ad28",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "daCWgcr9oB57gOJs",
+          "name": "Gmail account 3"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "addLabels",
+        "messageId": "={{ $node[\"Combine Message ID with Classification\"].json.id }}",
+        "labelIds": [
+          "Label_1"
+        ]
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        5600,
+        -1000
+      ],
+      "id": "6048453f-1aa3-4984-9a66-2bb444ecaf83",
+      "name": "AU Transfer Label",
+      "webhookId": "a62b8e9e-335f-43a4-9b38-b39fbade6402",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "daCWgcr9oB57gOJs",
+          "name": "Gmail account 3"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "addLabels",
+        "messageId": "={{ $node[\"Combine Message ID with Classification\"].json.id }}",
+        "labelIds": [
+          "Label_1550833512332062593"
+        ]
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        5600,
+        -800
+      ],
+      "id": "55fdb737-cfcd-4be7-b87d-1783b13a414d",
+      "name": "Closing Notice Label",
+      "webhookId": "b329dad1-d61e-4143-9d80-6cd0cc1ee06c",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "daCWgcr9oB57gOJs",
+          "name": "Gmail account 3"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "addLabels",
+        "messageId": "={{ $node[\"Combine Message ID with Classification\"].json.id }}",
+        "labelIds": [
+          "Label_6520408010545719252"
+        ]
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        5600,
+        -620
+      ],
+      "id": "f2852ed9-7477-4093-95f3-c63ab67730a9",
+      "name": "Commitment change label",
+      "webhookId": "8a3f4636-870f-4d89-b42a-290775578146",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "daCWgcr9oB57gOJs",
+          "name": "Gmail account 3"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "addLabels",
+        "messageId": "={{ $node[\"Combine Message ID with Classification\"].json.id }}",
+        "labelIds": [
+          "Label_323253041833782465"
+        ]
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        5600,
+        -440
+      ],
+      "id": "69b57d6f-c527-4015-b702-11377101347b",
+      "name": "Fee Payment Label",
+      "webhookId": "232f34cc-4e24-4f2b-860e-300af26527cf",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "daCWgcr9oB57gOJs",
+          "name": "Gmail account 3"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "addLabels",
+        "messageId": "={{ $node[\"Combine Message ID with Classification\"].json.id }}",
+        "labelIds": [
+          "Label_4654539397462810184"
+        ]
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        5600,
+        -240
+      ],
+      "id": "ada2a6ad-5917-4f09-99a9-56c47742d7aa",
+      "name": "MM-Inbound Label",
+      "webhookId": "5307da37-1890-481c-bf6c-27d03b8a79eb",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "daCWgcr9oB57gOJs",
+          "name": "Gmail account 3"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "addLabels",
+        "messageId": "={{ $node[\"Combine Message ID with Classification\"].json.id }}",
+        "labelIds": [
+          "Label_4955672825555699457"
+        ]
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        5600,
+        -20
+      ],
+      "id": "2ae47842-4ab5-4035-9372-e425a49b6bcd",
+      "name": "MM Outbound Label",
+      "webhookId": "52e21a0c-c7d4-499c-ad3f-9a33586a26ed",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "daCWgcr9oB57gOJs",
+          "name": "Gmail account 3"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "addLabels",
+        "messageId": "={{ $node[\"Combine Message ID with Classification\"].json.id }}",
+        "labelIds": [
+          "Label_6572657810821706644"
+        ]
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        5600,
+        160
+      ],
+      "id": "79bcdc08-5148-4bcf-818c-6a0d60b2add7",
+      "name": "Low Confidence Label",
+      "webhookId": "f0ea2103-c770-44b7-895f-ae2e41d3a92b",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "daCWgcr9oB57gOJs",
+          "name": "Gmail account 3"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "addLabels",
+        "messageId": "={{ $node[\"Combine Message ID with Classification\"].json.id }}",
+        "labelIds": [
+          "Label_8829588695416591128"
+        ]
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        5620,
+        380
+      ],
+      "id": "e5762b56-25fe-4e02-96f0-66be017beb8b",
+      "name": "Unclassified Label",
+      "webhookId": "45bab668-0cd1-4564-96c5-2c16fa48db3a",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "daCWgcr9oB57gOJs",
+          "name": "Gmail account 3"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "returnAll": "=// Configuration for Gmail \"Get message ID\" node\n{\n  \"resource\": \"message\", \n  \"operation\": \"list\",  // Use \"list\" instead of \"getAll\"\n  \"returnAll\": false,\n  \"limit\": 1,\n  \"options\": {\n    \"q\": \"from:{{ $node[\"Code\"].json.from }} subject:{{ $node[\"Code\"].json.subject }} newer_than:1d\"\n  }\n}",
+        "filters": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        3840,
+        -400
+      ],
+      "id": "276ddc76-4be5-45d3-97cb-dd7a28047fe4",
+      "name": "Get message ID",
+      "webhookId": "e1853709-9cfd-4f28-a0a9-55f2cf279d29",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "daCWgcr9oB57gOJs",
+          "name": "Gmail account 3"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Add a Code node after \"Get message ID\" to preserve classification data\n// Name this node \"Combine Gmail ID with Classification\"\n\nconst gmail = $node[\"Get message ID\"].json;\nconst classification = $node[\"Code4\"].json;\n\n// Merge the Gmail message ID with the classification data\nreturn {\n  json: {\n    // Gmail message properties\n    id: gmail.id,\n    threadId: gmail.threadId,\n    \n    // Classification properties from Code4\n    requestType: classification.requestType,\n    subRequestType: classification.subRequestType,\n    loanNumber: classification.loanNumber,\n    amount: classification.amount,\n    confidenceScore: classification.confidenceScore,\n    intent: classification.intent,\n    dates: classification.dates,\n    contacts: classification.contacts,\n    \n    // Other metadata\n    emailMetadata: classification.emailMetadata,\n    needsHumanReview: classification.needsHumanReview\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4060,
+        -400
+      ],
+      "id": "7c8fdd74-2798-40ca-8e5b-398e50b728d4",
+      "name": "Combine Message ID with Classification"
+    },
+    {
+      "parameters": {
+        "operation": "addLabels",
+        "messageId": "={{ $node[\"Combine Message ID with Classification\"].json.id }}",
+        "labelIds": [
+          "Label_47388760094257603"
+        ]
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        5620,
+        600
+      ],
+      "id": "d6211dc6-79f0-4fa2-93d9-af38f945b774",
+      "name": "Inquiry Label",
+      "webhookId": "45bab668-0cd1-4564-96c5-2c16fa48db3a",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "daCWgcr9oB57gOJs",
+          "name": "Gmail account 3"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "addLabels",
+        "messageId": "={{ $node[\"Combine Message ID with Classification\"].json.id }}",
+        "labelIds": [
+          "Label_5822402282059687409"
+        ]
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        5620,
+        820
+      ],
+      "id": "4e32dfff-e430-4167-bd7c-f3601432db61",
+      "name": "Complaint Label",
+      "webhookId": "45bab668-0cd1-4564-96c5-2c16fa48db3a",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "daCWgcr9oB57gOJs",
+          "name": "Gmail account 3"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "addLabels",
+        "messageId": "={{ $node[\"Combine Message ID with Classification\"].json.id }}",
+        "labelIds": [
+          "Label_6220295049568959405"
+        ]
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        5620,
+        1040
+      ],
+      "id": "f87be381-ceee-48ad-aaa0-2ad407d0fb44",
+      "name": "Document request Label",
+      "webhookId": "45bab668-0cd1-4564-96c5-2c16fa48db3a",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "daCWgcr9oB57gOJs",
+          "name": "Gmail account 3"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "addLabels",
+        "messageId": "={{ $node[\"Combine Message ID with Classification\"].json.id }}",
+        "labelIds": [
+          "Label_949818703243629034"
+        ]
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        5620,
+        1260
+      ],
+      "id": "04fe0d32-f5c3-4859-ae85-d32ed1270a23",
+      "name": "Security Concern Label",
+      "webhookId": "45bab668-0cd1-4564-96c5-2c16fa48db3a",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "daCWgcr9oB57gOJs",
+          "name": "Gmail account 3"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Loop Over Items": {
+      "main": [
+        [
+          {
+            "node": "Code",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Replace Me",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Replace Me": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code": {
+      "main": [
+        [
+          {
+            "node": "Code1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code1": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "OpenAI1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI": {
+      "main": [
+        [
+          {
+            "node": "Code2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI1": {
+      "main": [
+        [
+          {
+            "node": "Code3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code2": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Code7",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code4": {
+      "main": [
+        [
+          {
+            "node": "Get message ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch": {
+      "main": [
+        [
+          {
+            "node": "Adustment Label",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "AU Transfer Label",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Closing Notice Label",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Commitment change label",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fee Payment Label",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "MM-Inbound Label",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "MM Outbound Label",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Low Confidence Label",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Unclassified Label",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Inquiry Label",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Complaint Label",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Document request Label",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Security Concern Label",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Gmail Trigger1": {
+      "main": [
+        []
+      ]
+    },
+    "Loop Over Items1": {
+      "main": [
+        [
+          {
+            "node": "Switch1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Replace Me1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Replace Me1": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch1": {
+      "main": [
+        [
+          {
+            "node": "Extract from File",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Code5",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract from File": {
+      "main": [
+        [
+          {
+            "node": "Merge1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge1": {
+      "main": [
+        [
+          {
+            "node": "Code6",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code5": {
+      "main": [
+        [
+          {
+            "node": "Merge1",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Code6": {
+      "main": [
+        [
+          {
+            "node": "Process Attachments",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Attachments": {
+      "main": [
+        [
+          {
+            "node": "OpenAI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code7": {
+      "main": [
+        [
+          {
+            "node": "Code4",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code3": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Email Trigger (IMAP)": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Final Merge": {
+      "main": [
+        [
+          {
+            "node": "Replace Me2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Adustment Label": {
+      "main": [
+        [
+          {
+            "node": "Final Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AU Transfer Label": {
+      "main": [
+        [
+          {
+            "node": "Final Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Closing Notice Label": {
+      "main": [
+        [
+          {
+            "node": "Final Merge",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "Commitment change label": {
+      "main": [
+        [
+          {
+            "node": "Final Merge",
+            "type": "main",
+            "index": 3
+          }
+        ]
+      ]
+    },
+    "Fee Payment Label": {
+      "main": [
+        [
+          {
+            "node": "Final Merge",
+            "type": "main",
+            "index": 4
+          }
+        ]
+      ]
+    },
+    "MM-Inbound Label": {
+      "main": [
+        [
+          {
+            "node": "Final Merge",
+            "type": "main",
+            "index": 5
+          }
+        ]
+      ]
+    },
+    "MM Outbound Label": {
+      "main": [
+        [
+          {
+            "node": "Final Merge",
+            "type": "main",
+            "index": 6
+          }
+        ]
+      ]
+    },
+    "Low Confidence Label": {
+      "main": [
+        [
+          {
+            "node": "Final Merge",
+            "type": "main",
+            "index": 7
+          }
+        ]
+      ]
+    },
+    "Unclassified Label": {
+      "main": [
+        [
+          {
+            "node": "Final Merge",
+            "type": "main",
+            "index": 8
+          }
+        ]
+      ]
+    },
+    "Get message ID": {
+      "main": [
+        [
+          {
+            "node": "Combine Message ID with Classification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Combine Message ID with Classification": {
+      "main": [
+        [
+          {
+            "node": "Switch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "62890cf3-6f0f-4fd0-88ed-73bb57027792",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "af2dc878cfbfc30acba63a05e40ff07ed1667afe4b0173cb37eb05716355b761"
+  },
+  "id": "9nVrMIRmXuyurbNv",
+  "tags": []
+}
