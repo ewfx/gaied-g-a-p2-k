@@ -18,8 +18,7 @@ Our Email Classification System is an automated solution that transforms how ban
 Banks receive hundreds of emails daily across various departments, with requests ranging from loan modifications to transaction inquiries. Traditionally, staff manually sort, categorize, and route these messages, creating bottlenecks and inconsistent customer experiences. Our system eliminates these inefficiencies by automating the entire process from receipt to routing.
 
 ## 🎥 Demo
-🔗 [Live Demo](#) (if applicable)  
-📹 [Video Demo](#) (if applicable)  
+
 🖼️ Screenshots:
 
 ![Screenshot 1]([link-to-image](https://drive.google.com/file/d/1o4bAU1DimRdud9VcG1-fAu0r4oeufQdw/view?usp=drive_link)
