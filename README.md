@@ -22,9 +22,9 @@ Banks receive hundreds of emails daily across various departments, with requests
 📹 [Video Demo](#) (if applicable)  
 🖼️ Screenshots:
 
-![Screenshot 1]([link-to-image]) (https://drive.google.com/file/d/1o4bAU1DimRdud9VcG1-fAu0r4oeufQdw/view?usp=drive_link)
-![Screenshot 2]([link-to-image]) (https://drive.google.com/file/d/1Jz1TFPNwI-dDc0o6QqBktmuCNoChnNAV/view?usp=drive_link)
-![Screenshot 3]([link-to-image]) (https://drive.google.com/file/d/1KLzOqYqEiybCcm02pWho_upYZBg5EPSN/view?usp=drive_link)
+![Screenshot 1]([link-to-image](https://drive.google.com/file/d/1o4bAU1DimRdud9VcG1-fAu0r4oeufQdw/view?usp=drive_link)
+![Screenshot 2]([link-to-image](https://drive.google.com/file/d/1Jz1TFPNwI-dDc0o6QqBktmuCNoChnNAV/view?usp=drive_link)
+![Screenshot 3]([link-to-image](https://drive.google.com/file/d/1KLzOqYqEiybCcm02pWho_upYZBg5EPSN/view?usp=drive_link)
 
 ## 💡 Inspiration
 The inspiration for this project came from observing the operational inefficiencies in banking communication systems. We noticed that:
