@@ -117,7 +117,7 @@ OpenAI API key
 
 Setup steps:
 
-Import the workflow JSON (/code/Email_classification_IMAP_26_Mar.json)into your n8n instance
+Import the workflow JSON (code/Email_classification_IMAP_26_Mar.json) into your n8n instance
 Configure the following credentials:
 
 IMAP account for email reception
